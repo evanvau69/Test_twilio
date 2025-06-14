@@ -1,12 +1,7 @@
 services:
   - type: web
-    name: twilio-bot
+    name: your-bot-name
     env: python
     plan: free
-    buildCommand: ""
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "python main.py"
-    envVars:
-      - key: BOT_TOKEN
-        value: your-telegram-bot-token
-      - key: ADMIN_ID
-        value: your-admin-id

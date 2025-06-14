@@ -32,6 +32,30 @@ CANADA_AREA_CODES = [
     '782', '807', '819', '825', '867', '873', '902', '905'
 ]
 
+async def get_available_numbers(sid, auth, area_code=None):
+    """Fetch available numbers from Twilio API"""
+    try:
+        async with aiohttp.ClientSession(auth=aiohttp.BasicAuth(sid, auth)) as session:
+            base_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/AvailablePhoneNumbers/CA/Local.json"
+            
+            params = {}
+            if area_code:
+                params['AreaCode'] = area_code
+            else:
+                params['AreaCode'] = ','.join(random.sample(CANADA_AREA_CODES, 3))
+            
+            async with session.get(base_url, params=params) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return [num['phone_number'] for num in data.get('available_phone_numbers', [])]
+                else:
+                    error = await resp.json()
+                    logger.error(f"Error fetching numbers: {error}")
+                    return []
+    except Exception as e:
+        logger.error(f"Exception in get_available_numbers: {str(e)}")
+        return []
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.full_name
@@ -83,36 +107,41 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     args = context.args
-    selected_area_codes = []
+    area_code = args[0] if args else None
 
-    if args:
-        area_code = args[0]
-        if area_code in CANADA_AREA_CODES:
-            selected_area_codes = [area_code] * 30
-        else:
-            await update.message.reply_text("⚠️ Invalid area code. Please provide a valid Canada area code.")
+    sid = session.get("sid")
+    auth = session.get("auth")
+
+    try:
+        # Get available numbers from Twilio
+        available_numbers = await get_available_numbers(sid, auth, area_code)
+        
+        if not available_numbers:
+            await update.message.reply_text("⚠️ No available numbers found. Try a different area code.")
             return
-    else:
-        count = min(30, len(CANADA_AREA_CODES))
-        selected_area_codes = random.sample(CANADA_AREA_CODES, count)
 
-    phone_numbers = [f"+1{code}{random.randint(1000000, 9999999)}" for code in selected_area_codes]
+        # Show first 30 numbers (or less if not available)
+        numbers_to_show = available_numbers[:30]
+        
+        message_text = "Available numbers from Twilio:\n\n" + "\n".join(numbers_to_show)
+        buttons = [[InlineKeyboardButton(num, callback_data=f"number_{num}")] for num in numbers_to_show]
+        buttons.append([InlineKeyboardButton("Cancel ❌", callback_data="cancel_buy")])
+        reply_markup = InlineKeyboardMarkup(buttons)
 
-    message_text = "Available numbers:\n\n" + "\n".join(phone_numbers)
-    buttons = [[InlineKeyboardButton(num, callback_data=f"number_{num}")] for num in phone_numbers]
-    buttons.append([InlineKeyboardButton("Cancel ❌", callback_data="cancel_buy")])
-    reply_markup = InlineKeyboardMarkup(buttons)
+        sent_msg = await update.message.reply_text(message_text, reply_markup=reply_markup)
 
-    sent_msg = await update.message.reply_text(message_text, reply_markup=reply_markup)
+        async def delete_message():
+            await asyncio.sleep(300)
+            try:
+                await sent_msg.delete()
+            except:
+                pass
 
-    async def delete_message():
-        await asyncio.sleep(300)
-        try:
-            await sent_msg.delete()
-        except:
-            pass
+        asyncio.create_task(delete_message())
 
-    asyncio.create_task(delete_message())
+    except Exception as e:
+        logger.error(f"Error in buy_command: {str(e)}")
+        await update.message.reply_text("❌ An error occurred while fetching numbers. Please try again.")
 
 async def delete_existing_numbers(session_http, sid):
     """Delete all existing phone numbers for the account"""

@@ -12,7 +12,8 @@ from datetime import datetime, timedelta
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
-RENDER_URL = os.getenv("RENDER_URL")  # Your Render URL (e.g., "your-bot-name.onrender.com")
+RENDER_URL = os.getenv("RENDER_URL")  # e.g. "your-app-name.onrender.com"
+PORT = int(os.environ.get("PORT", 10000))
 
 # Setup logging
 logging.basicConfig(
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Database simulation
 free_trial_users = {}
 user_sessions = {}
-purchased_numbers = {}  # Stores user's purchased numbers: {user_id: [numbers]}
+purchased_numbers = {}  # {user_id: [numbers]}
 active_subscriptions = {}  # {user_id: expiry_timestamp}
 
 CANADA_AREA_CODES = ['204', '236', '249', '250', '289', '306', '343', '365', '403', '416', '418', '431', '437', '438', '450', '506', '514', '519', '579', '581', '587', '604', '613', '639', '647', '672', '705', '709', '778', '780', '782', '807', '819', '825', '867', '873', '902', '905']
@@ -490,10 +491,9 @@ async def main():
     
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logger.info("Bot is running with Twilio webhooks...")
+    logger.info(f"Bot is running on port {PORT}...")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":

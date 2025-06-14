@@ -4,12 +4,15 @@ import asyncio
 from datetime import datetime, timedelta
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from twilio.rest import Client
 
+# Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "YOUR_ADMIN_ID"))
 TRIAL_USERS = set()
 SUBSCRIBED_USERS = {}
+USER_TWILIO_CREDS = {}  # Stores user_id: {'sid': '', 'token': '', 'account_name': '', 'balance': ''}
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -96,6 +99,61 @@ async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.send_message(chat_id=user_id, text="❌ আপনার Subscription অনুরোধ বাতিল করা হয়েছে।")
         await query.edit_message_text(f"❌ {user_id} ইউজারের Subscription বাতিল করা হয়েছে।")
 
+async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    keyboard = [[InlineKeyboardButton("Login 🔒", callback_data="login_prompt")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Login করতে নিচের বাটনে ক্লিক করুন",
+        reply_markup=reply_markup
+    )
+
+async def handle_login_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.message.delete()
+    await query.message.reply_text(
+        "আপনার Sid এবং Auth Token দিন ✅\nব্যবহার: <sid> <auth>"
+    )
+
+async def handle_twilio_credentials(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text.strip()
+    
+    if len(text.split()) != 2:
+        await update.message.reply_text("❌ ভুল ফরম্যাট! সঠিক ফরম্যাট: <sid> <auth>")
+        return
+    
+    sid, auth = text.split()
+    
+    try:
+        # Test Twilio credentials
+        twilio_client = Client(sid, auth)
+        account = twilio_client.api.accounts(sid).fetch()
+        balance = float(twilio_client.balance.fetch().balance)
+        
+        # Store credentials
+        USER_TWILIO_CREDS[user.id] = {
+            'sid': sid,
+            'token': auth,
+            'account_name': account.friendly_name,
+            'balance': balance
+        }
+        
+        # Success message
+        response = (
+            f"🎉 𝐋𝐨𝐠 𝐈𝐧 𝐒𝐮𝐜𝐜𝐞𝐬𝐬𝐟𝐮𝐥🎉\n"
+            f"⭕ 𝗔𝗰𝗰𝗼𝘂𝗻𝘁 𝗡𝗮𝗺𝗲 : {account.friendly_name}\n"
+            f"⭕ 𝗔𝗰𝗰𝗼𝘂𝗻𝘁 𝗕𝗮𝗹𝗮𝗻𝗰𝗲 : ${balance:.2f}\n\n"
+            f"বিঃদ্রঃ নাম্বার কিনার আগে ব্যালেন্স চেক করে নিবেন ♻️\n"
+            f"Founded By 𝗠𝗿 𝗘𝘃𝗮𝗻 🍁"
+        )
+        await update.message.reply_text(response)
+        
+    except Exception as e:
+        logger.error(f"Twilio login failed: {e}")
+        await update.message.reply_text("Token Suspended 😃 অন্য টোকেন ব্যবহার করুন ✅")
+
 async def webhook(request):
     data = await request.json()
     await application.update_queue.put(Update.de_json(data, application.bot))
@@ -105,10 +163,19 @@ async def main():
     global application
     application = Application.builder().token(BOT_TOKEN).build()
     
+    # Command handlers
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("login", login_command))
+    
+    # Callback handlers
     application.add_handler(CallbackQueryHandler(handle_plan_choice, pattern="^(free_1h|1d|7d|15d|30d)$"))
     application.add_handler(CallbackQueryHandler(handle_admin_decision, pattern="^(approve|cancel)\\|"))
-
+    application.add_handler(CallbackQueryHandler(handle_login_prompt, pattern="^login_prompt$"))
+    
+    # Message handlers
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_twilio_credentials))
+    
+    # Webhook setup
     app = web.Application()
     app.router.add_post("/", webhook)
 

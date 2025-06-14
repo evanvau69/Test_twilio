@@ -254,7 +254,7 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get available numbers from Twilio (now fetching 10 numbers)
         available_numbers = twilio_client.available_phone_numbers('CA') \
                                         .local \
-                                        .list(area_code=area_code, limit=10)
+                                        .list(area_code=area_code, limit=10)  # Changed from 20 to 10
         
         if not available_numbers:
             await update.message.reply_text("❌ এই মুহূর্তে কোনো নাম্বার পাওয়া যাচ্ছে না। পরে আবার চেষ্টা করুন")
@@ -297,17 +297,10 @@ async def handle_number_purchase(update: Update, context: ContextTypes.DEFAULT_T
     try:
         twilio_client = Client(USER_TWILIO_CREDS[user_id]['sid'], USER_TWILIO_CREDS[user_id]['token'])
         
-        # Get actual phone number cost
-        number_details = twilio_client.available_phone_numbers('CA').local.list(
-            phone_number=number,
-            limit=1
-        )[0]
-        actual_cost = float(number_details.cost)
-        
         # Check balance first
         balance = float(twilio_client.balance.fetch().balance)
-        if balance < actual_cost:
-            await query.message.reply_text(f"❌ আপনার Twilio একাউন্টে পর্যাপ্ত ব্যালেন্স নেই। প্রয়োজন: ${actual_cost:.2f}, বর্তমান ব্যালেন্স: ${balance:.2f}")
+        if balance < 1.00:
+            await query.message.reply_text(f"❌ আপনার Twilio একাউন্টে পর্যাপ্ত ব্যালেন্স নেই। বর্তমান ব্যালেন্স: ${balance:.2f}")
             return
         
         # Delete old number if exists
@@ -326,12 +319,11 @@ async def handle_number_purchase(update: Update, context: ContextTypes.DEFAULT_T
         PURCHASED_NUMBERS[user_id] = {
             'number': number,
             'sid': purchased_number.sid,
-            'purchase_date': datetime.utcnow(),
-            'cost': actual_cost
+            'purchase_date': datetime.utcnow()
         }
         
         # Update balance
-        new_balance = balance - actual_cost
+        new_balance = balance - 1.00
         USER_TWILIO_CREDS[user_id]['balance'] = new_balance
         
         # Prepare response
@@ -344,7 +336,7 @@ async def handle_number_purchase(update: Update, context: ContextTypes.DEFAULT_T
         response_text = (
             f"✅ নাম্বার সফলভাবে কেনা হয়েছে!\n\n"
             f"📞 নাম্বার: {number}\n"
-            f"💰 খরচ: ${actual_cost:.2f}\n"
+            f"💰 খরচ: $1.00\n"
             f"📊 নতুন ব্যালেন্স: ${new_balance:.2f}\n"
             f"🕒 কেনার সময়: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
         )
@@ -353,13 +345,10 @@ async def handle_number_purchase(update: Update, context: ContextTypes.DEFAULT_T
         if user_id in PURCHASED_NUMBERS:
             response_text += "\n\nℹ️ আপনার পূর্বের নাম্বারটি অটোমেটিক ডিলিট করা হয়েছে"
         
-        message = await query.message.reply_text(
+        await query.message.reply_text(
             response_text,
             reply_markup=reply_markup
         )
-        
-        # Store message ID for possible later editing
-        context.user_data['last_purchase_msg'] = message.message_id
         
     except TwilioRestException as e:
         error_msg = f"Twilio Error ({e.code}): {e.msg}"
@@ -437,41 +426,16 @@ async def number_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         info_text = (
             f"📞 নাম্বার ডিটেইলস:\n\n"
             f"🔢 নাম্বার: {number}\n"
-            f"💰 ক্রয় মূল্য: ${PURCHASED_NUMBERS[user_id]['cost']:.2f}\n"
             f"📅 কেনার তারিখ: {PURCHASED_NUMBERS[user_id]['purchase_date'].strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"🆔 SID: {number_details.sid}\n"
             f"🔗 URL: {number_details.uri}\n"
             f"🔄 সিঙ্ক স্ট্যাটাস: {number_details.status}"
         )
         
-        # Edit the message to show info
         await context.bot.edit_message_text(
             chat_id=query.message.chat_id,
             message_id=query.message.message_id,
             text=info_text
-        )
-        
-        # Revert back to original message after 5 seconds
-        original_text = (
-            f"✅ নাম্বার সফলভাবে কেনা হয়েছে!\n\n"
-            f"📞 নাম্বার: {number}\n"
-            f"💰 খরচ: ${PURCHASED_NUMBERS[user_id]['cost']:.2f}\n"
-            f"📊 বাকি ব্যালেন্স: ${USER_TWILIO_CREDS[user_id]['balance']:.2f}\n"
-            f"🕒 কেনার সময়: {PURCHASED_NUMBERS[user_id]['purchase_date'].strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        
-        keyboard = [
-            [InlineKeyboardButton("📧 Check Messages ✉️", callback_data=f"check_msg_{number}")],
-            [InlineKeyboardButton("ℹ️ Number Info", callback_data=f"number_info_{number}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await asyncio.sleep(5)
-        await context.bot.edit_message_text(
-            chat_id=query.message.chat_id,
-            message_id=query.message.message_id,
-            text=original_text,
-            reply_markup=reply_markup
         )
         
     except Exception as e:

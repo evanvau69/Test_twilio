@@ -1,330 +1,192 @@
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
-import sqlite3
+import os
 from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext, MessageHandler, Filters
+import logging
 import pytz
 
-# কনফিগারেশন
-ADMIN_CHAT_ID = "6165060012"  # আপনার টেলিগ্রাম চ্যাট আইডি দিন এখানে
-BOT_TOKEN = "7938926278:AAFRUMnq968-gcd4z9mV04cGGyu2v2X6bvE"  # আপনার বট টোকেন দিন এখানে
-
-# লগিং সেটআপ
+# লগিং কনফিগারেশন
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ডেটাবেস ফাংশন
-def init_db():
-    conn = sqlite3.connect('subscription_bot.db')
-    cursor = conn.cursor()
-    
-    # ইউজার টেবিল
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        first_name TEXT,
-        last_name TEXT,
-        subscription_type TEXT,
-        subscription_start TEXT,
-        subscription_end TEXT,
-        free_trial_used INTEGER DEFAULT 0
-    )
-    ''')
-    
-    # পেমেন্ট রিকোয়েস্ট টেবিল
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS payment_requests (
-        request_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        plan TEXT,
-        amount REAL,
-        status TEXT DEFAULT 'pending',
-        request_time TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    conn.commit()
-    conn.close()
+# ডাটাবেস হিসাবে একটি ডিকশনারি ব্যবহার করা হচ্ছে (প্রোডাকশনে ডাটাবেস ব্যবহার করুন)
+users_db = {}
+free_trial_used = set()
+ADMIN_CHAT_ID = "6165060012"  # এডমিনের চ্যাট আইডি এখানে সেট করুন
 
-def get_user(user_id):
-    conn = sqlite3.connect('subscription_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    user = cursor.fetchone()
-    conn.close()
-    return user
+# বট টোকেন (Render এ environment variable থেকে নেবে)
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-def update_user(user_id, **kwargs):
-    conn = sqlite3.connect('subscription_bot.db')
-    cursor = conn.cursor()
-    
-    set_clause = ', '.join([f"{key} = ?" for key in kwargs.keys()])
-    values = list(kwargs.values()) + [user_id]
-    
-    cursor.execute(f'''
-    UPDATE users 
-    SET {set_clause}
-    WHERE user_id = ?
-    ''', values)
-    
-    conn.commit()
-    conn.close()
+# প্ল্যানের ডেটা
+PLANS = {
+    '1h': {'duration': timedelta(hours=1), 'price': 0, 'text': '1 Hour - Free 🌸'},
+    '1d': {'duration': timedelta(days=1), 'price': 2, 'text': '1 Day - 2$'},
+    '7d': {'duration': timedelta(days=7), 'price': 10, 'text': '7 Day - 10$'},
+    '15d': {'duration': timedelta(days=15), 'price': 15, 'text': '15 Day - 15$'},
+    '30d': {'duration': timedelta(days=30), 'price': 20, 'text': '30 Day - 20$'}
+}
 
-def add_payment_request(user_id, plan, amount):
-    conn = sqlite3.connect('subscription_bot.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    INSERT INTO payment_requests (user_id, plan, amount)
-    VALUES (?, ?, ?)
-    ''', (user_id, plan, amount))
-    
-    conn.commit()
-    request_id = cursor.lastrowid
-    conn.close()
-    return request_id
-
-def update_payment_status(request_id, status):
-    conn = sqlite3.connect('subscription_bot.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    UPDATE payment_requests
-    SET status = ?
-    WHERE request_id = ?
-    ''', (status, request_id))
-    
-    conn.commit()
-    conn.close()
-
-# সাবস্ক্রিপশন চেক ফাংশন
-def has_active_subscription(user_id):
-    user = get_user(user_id)
-    if user and user[5]:  # subscription_end
-        now = datetime.now(pytz.utc)
-        subscription_end = datetime.strptime(user[5], '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.utc)
-        return subscription_end > now
-    return False
-
-# কমান্ড হ্যান্ডলার
+# স্টার্ট কমান্ড হ্যান্ডলার
 def start(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
-    user_id = user.id
-    username = user.username or "N/A"
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
-    full_name = f"{first_name} {last_name}".strip()
+    user_id = str(user.id)
     
-    # ইউজার ডেটাবেসে অ্যাড/আপডেট করুন
-    conn = sqlite3.connect('subscription_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    INSERT OR IGNORE INTO users (user_id, username, first_name, last_name)
-    VALUES (?, ?, ?, ?)
-    ''', (user_id, username, first_name, last_name))
-    conn.commit()
-    conn.close()
-    
-    if has_active_subscription(user_id):
+    # ইউজার ডাটাবেসে আছে কিনা চেক করুন
+    if user_id in users_db and users_db[user_id]['subscription_end'] > datetime.now(pytz.utc):
+        # সাবস্ক্রিপশন সক্রিয় আছে
         update.message.reply_text(
-            f'স্বাগতম {full_name} আপনার Subscription চালু আছে টোকেন দিয়ে Login করুন\n'
+            f'স্বাগতম {user.full_name} আপনার Subscription চালু আছে টোকেন দিয়ে Login করুন\n'
             'Login করতে /Login কমান্ড ব্যবহার করুন'
         )
     else:
+        # সাবস্ক্রিপশন সক্রিয় নেই
         keyboard = [
-            [InlineKeyboardButton("⬜ 1 Hour - Free 🌸", callback_data='free_trial')],
-            [InlineKeyboardButton("🔴 1 Day - 2$", callback_data='1_day')],
-            [InlineKeyboardButton("🟠 7 Day - 10$", callback_data='7_day')],
-            [InlineKeyboardButton("🟡 15 Day - 15$", callback_data='15_day')],
-            [InlineKeyboardButton("🟢 30 Day - 20$", callback_data='30_day')]
+            [
+                InlineKeyboardButton(PLANS['1h']['text'], callback_data='plan_1h'),
+                InlineKeyboardButton(PLANS['1d']['text'], callback_data='plan_1d')
+            ],
+            [
+                InlineKeyboardButton(PLANS['7d']['text'], callback_data='plan_7d'),
+                InlineKeyboardButton(PLANS['15d']['text'], callback_data='plan_15d')
+            ],
+            [
+                InlineKeyboardButton(PLANS['30d']['text'], callback_data='plan_30d')
+            ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
+        
         update.message.reply_text(
-            'আপনার Subscriptions চালু নেই ♻️ চালু করার জন্য নিচের Subscription Choose করুন ✅',
+            'আপনার Subscriptions চালু নেই ♻️\n'
+            'চালু করার জন্য নিচের Subscription Choose করুন ✅',
             reply_markup=reply_markup
         )
 
-# বাটন হ্যান্ডলার
-def button_handler(update: Update, context: CallbackContext) -> None:
+# ক্যালব্যাক কুয়েরি হ্যান্ডলার (বাটন ক্লিক)
+def button(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     query.answer()
-    user = query.from_user
-    user_id = user.id
-    username = user.username or "N/A"
-    first_name = user.first_name or ""
-    last_name = user.last_name or ""
-    full_name = f"{first_name} {last_name}".strip()
+    user = update.effective_user
+    user_id = str(user.id)
     
-    if query.data == 'free_trial':
-        # ফ্রি ট্রায়াল লজিক
-        user_data = get_user(user_id)
-        if user_data and user_data[7]:  # free_trial_used
-            query.edit_message_text(text="আপনি ইতিমধ্যে ফ্রি ট্রায়াল ব্যবহার করেছেন। অন্য প্যাকেজ নির্বাচন করুন।")
-        else:
-            # ফ্রি ট্রায়াল অ্যাক্টিভেট করুন
-            subscription_end = datetime.now() + timedelta(hours=1)
-            update_user(
-                user_id,
-                subscription_type='1 Hour Free',
-                subscription_start=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                subscription_end=subscription_end.strftime('%Y-%m-%d %H:%M:%S'),
-                free_trial_used=1
-            )
-            query.edit_message_text(
-                text=f"আপনার 1 ঘন্টার ফ্রি ট্রায়াল সক্রিয় করা হয়েছে! "
-                     f"{subscription_end.strftime('%Y-%m-%d %H:%M:%S')} পর্যন্ত সক্রিয় থাকবে।"
-            )
+    if query.data.startswith('plan_'):
+        plan_key = query.data.split('_')[1]
+        plan = PLANS[plan_key]
+        
+        # ফ্রি ট্রায়াল চেক
+        if plan_key == '1h' and user_id in free_trial_used:
+            query.edit_message_text(text='আপনি ইতিমধ্যে ফ্রি ট্রায়াল ব্যবহার করেছেন। অন্য প্ল্যান নির্বাচন করুন।')
+            return
+        
+        # ফ্রি প্ল্যান হলে সরাসরি অ্যাক্টিভেট করুন
+        if plan_key == '1h':
+            # ফ্রি ট্রায়াল মার্ক করুন
+            free_trial_used.add(user_id)
+            
+            # সাবস্ক্রিপশন অ্যাক্টিভেট করুন
+            subscription_end = datetime.now(pytz.utc) + plan['duration']
+            users_db[user_id] = {
+                'name': user.full_name,
+                'username': user.username,
+                'subscription_end': subscription_end,
+                'plan': plan_key
+            }
+            
+            query.edit_message_text(text=f'আপনার ১ ঘন্টার ফ্রি ট্রায়াল সক্রিয় করা হয়েছে! এটি {subscription_end} এ শেষ হবে।')
+            return
+        
+        # পেইড প্ল্যানের জন্য পেমেন্ট তথ্য পাঠান
+        payment_message = (
+            f'Please send ${plan["price"]} to Binance Pay ID:\n'
+            'পেমেন্ট করে প্রমান হিসাবে Admin এর কাছে স্কিনশর্ট অথবা transaction ID দিন @Mr_Evan3490\n\n'
+            f'Your payment details:\n'
+            f'❄️ Name : {user.full_name}\n'
+            f'🆔 User ID: `{user.id}`\n'
+            f'👤 Username: @{user.username}\n'
+            f'📋 Plan: {plan["text"]}\n'
+            f'💰 Amount: ${plan["price"]}'
+        )
+        
+        query.edit_message_text(text=payment_message, parse_mode='Markdown')
+        
+        # এডমিনকে নোটিফাই করুন
+        admin_keyboard = [
+            [
+                InlineKeyboardButton("Approve ✅", callback_data=f'approve_{user_id}_{plan_key}'),
+                InlineKeyboardButton("Cancel ❌", callback_data=f'cancel_{user_id}')
+            ]
+        ]
+        admin_reply_markup = InlineKeyboardMarkup(admin_keyboard)
+        
+        context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                f'{user.full_name} {plan["text"]} সময়ের জন্য Subscription নিতে চাচ্ছে।\n\n'
+                f'🔆 User Name : {user.full_name}\n'
+                f'🔆 User ID : {user.id}\n'
+                f'🔆 Username : @{user.username}'
+            ),
+            reply_markup=admin_reply_markup
+        )
     
-    else:
-        # পেইড প্যাকেজ হ্যান্ডলিং
-        plans = {
-            '1_day': {'text': '1 Day', 'amount': 2},
-            '7_day': {'text': '7 Days', 'amount': 10},
-            '15_day': {'text': '15 Days', 'amount': 15},
-            '30_day': {'text': '30 Days', 'amount': 20}
+    elif query.data.startswith('approve_'):
+        # এডমিন অ্যাপ্রুভ করলে
+        _, user_id, plan_key = query.data.split('_')
+        plan = PLANS[plan_key]
+        
+        # সাবস্ক্রিপশন অ্যাক্টিভেট করুন
+        subscription_end = datetime.now(pytz.utc) + plan['duration']
+        users_db[user_id] = {
+            'name': users_db.get(user_id, {}).get('name', ''),
+            'username': users_db.get(user_id, {}).get('username', ''),
+            'subscription_end': subscription_end,
+            'plan': plan_key
         }
         
-        plan = plans.get(query.data)
-        if plan:
-            # পেমেন্ট রিকোয়েস্ট তৈরি করুন
-            request_id = add_payment_request(user_id, plan['text'], plan['amount'])
-            
-            # ইউজারকে পেমেন্ট ইনস্ট্রাকশন দিন
-            message = f'''
-Please send ${plan['amount']} to Binance Pay ID: 
-পেমেন্ট করে প্রমান হিসাবে Admin এর কাছে স্কিনশর্ট অথবা transaction ID দিন @Mr_Evan3490
-
-Your payment details:
-❄️ Name : {full_name}
-🆔 User ID: `{user_id}` (কপি করতে ক্লিক করুন)
-👤 Username: @{username}
-📋 Plan: {plan['text']}
-💰 Amount: ${plan['amount']}
-'''
-            query.edit_message_text(text=message, parse_mode='Markdown')
-            
-            # অ্যাডমিনকে নোটিফাই করুন
-            admin_message = f'''
-{full_name} {plan['text']} সময়ের জন্য Subscription নিতে চাচ্ছে।
-
-🔆 User Name : {full_name}
-🔆 User ID : {user_id}
-🔆 Username : @{username}
-🔆 Plan : {plan['text']}
-🔆 Amount : ${plan['amount']}
-'''
-            keyboard = [
-                [
-                    InlineKeyboardButton("Approve ✅", callback_data=f'approve_{request_id}'),
-                    InlineKeyboardButton("Cancel ❌", callback_data=f'cancel_{request_id}')
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=admin_message,
-                reply_markup=reply_markup
-            )
-
-# অ্যাডমিন অ্যাকশন হ্যান্ডলার
-def admin_action_handler(update: Update, context: CallbackContext) -> None:
-    query = update.callback_query
-    query.answer()
-    data = query.data.split('_')
-    action = data[0]
-    request_id = int(data[1])
-    
-    # পেমেন্ট রিকোয়েস্ট ডিটেইলস নিন
-    conn = sqlite3.connect('subscription_bot.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    SELECT pr.*, u.first_name, u.last_name, u.username 
-    FROM payment_requests pr
-    JOIN users u ON pr.user_id = u.user_id
-    WHERE pr.request_id = ?
-    ''', (request_id,))
-    payment_request = cursor.fetchone()
-    
-    if not payment_request:
-        query.edit_message_text(text="Error: Payment request not found")
-        conn.close()
-        return
-    
-    user_id = payment_request[1]
-    plan = payment_request[2]
-    amount = payment_request[3]
-    first_name = payment_request[5] or ""
-    last_name = payment_request[6] or ""
-    full_name = f"{first_name} {last_name}".strip()
-    username = payment_request[7] or "N/A"
-    
-    if action == 'approve':
-        # সাবস্ক্রিপশন অ্যাক্টিভেট করুন
-        days = int(plan.split()[0])
-        subscription_end = datetime.now() + timedelta(days=days)
-        
-        cursor.execute('''
-        UPDATE users 
-        SET subscription_type = ?,
-            subscription_start = datetime('now'),
-            subscription_end = ?
-        WHERE user_id = ?
-        ''', (plan, subscription_end.strftime('%Y-%m-%d %H:%M:%S'), user_id))
-        
-        update_payment_status(request_id, 'approved')
-        conn.commit()
+        # এডমিনকে কনফার্মেশন পাঠান
+        query.edit_message_text(text=f'Subscription approved for user {user_id}')
         
         # ইউজারকে নোটিফাই করুন
         context.bot.send_message(
             chat_id=user_id,
-            text=f"আপনার {plan} সাবস্ক্রিপশন সফলভাবে অ্যাক্টিভেট করা হয়েছে! "
-                 f"{subscription_end.strftime('%Y-%m-%d %H:%M:%S')} পর্যন্ত সক্রিয় থাকবে।"
-        )
-        
-        query.edit_message_text(
-            text=f"✅ Approved: {full_name} এর {plan} সাবস্ক্রিপশন\n"
-                 f"User ID: {user_id}\n"
-                 f"Username: @{username}"
+            text=f'আপনার সাবস্ক্রিপশন সক্রিয় করা হয়েছে! এটি {subscription_end} এ শেষ হবে।'
         )
     
-    elif action == 'cancel':
-        update_payment_status(request_id, 'cancelled')
-        conn.commit()
+    elif query.data.startswith('cancel_'):
+        # এডমিন ক্যান্সেল করলে
+        _, user_id = query.data.split('_')
+        
+        # এডমিনকে কনফার্মেশন পাঠান
+        query.edit_message_text(text=f'Subscription request canceled for user {user_id}')
         
         # ইউজারকে নোটিফাই করুন
         context.bot.send_message(
             chat_id=user_id,
-            text=f"আপনার {plan} সাবস্ক্রিপশন রিকোয়েস্ট বাতিল করা হয়েছে।"
+            text='আপনার সাবস্ক্রিপশন রিকোয়েস্ট বাতিল করা হয়েছে।'
         )
-        
-        query.edit_message_text(
-            text=f"❌ Cancelled: {full_name} এর {plan} সাবস্ক্রিপশন\n"
-                 f"User ID: {user_id}\n"
-                 f"Username: @{username}"
-        )
-    
-    conn.close()
 
-def main():
-    # ডেটাবেস ইনিশিয়ালাইজ করুন
-    init_db()
-    
-    # আপডেটার তৈরি করুন
-    updater = Updater(BOT_TOKEN)
+# এরর হ্যান্ডলার
+def error(update: Update, context: CallbackContext) -> None:
+    logger.warning('Update "%s" caused error "%s"', update, context.error)
+
+# মেইন ফাংশন
+def main() -> None:
+    # আপডেটার তৈরি করুন এবং ডিসপ্যাচারে যোগ করুন
+    updater = Updater(TOKEN)
     dispatcher = updater.dispatcher
+
+    # কমান্ড হ্যান্ডলার
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CallbackQueryHandler(button))
     
-    # হ্যান্ডলার রেজিস্টার করুন
-    dispatcher.add_handler(CommandHandler('start', start))
-    dispatcher.add_handler(CallbackQueryHandler(button_handler, pattern='^(free_trial|1_day|7_day|15_day|30_day)$'))
-    dispatcher.add_handler(CallbackQueryHandler(admin_action_handler, pattern='^(approve|cancel)_\d+$'))
-    
+    # লগ সব errors
+    dispatcher.add_error_handler(error)
+
     # বট শুরু করুন
     updater.start_polling()
-    logger.info("Bot started and polling...")
+    
+    # বট চালু রাখুন Ctrl+C পর্যন্ত
     updater.idle()
 
 if __name__ == '__main__':

@@ -251,10 +251,10 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ ভুল Area Code! সঠিক 3-digit Canadian area code দিন")
             return
 
-        # Get available numbers from Twilio
+        # Get available numbers from Twilio (now fetching 10 numbers)
         available_numbers = twilio_client.available_phone_numbers('CA') \
                                         .local \
-                                        .list(area_code=area_code, limit=20)
+                                        .list(area_code=area_code, limit=10)  # Changed from 20 to 10
         
         if not available_numbers:
             await update.message.reply_text("❌ এই মুহূর্তে কোনো নাম্বার পাওয়া যাচ্ছে না। পরে আবার চেষ্টা করুন")
@@ -265,7 +265,7 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         numbers_text = "\n".join([f"{i+1}. {num}" for i, num in enumerate(numbers)])
         
         message = await update.message.reply_text(
-            f"🇨🇦 উপলব্ধ কানাডা নাম্বার লিস্ট:\n\n{numbers_text}\n\n"
+            f"🇨🇦 উপলব্ধ কানাডা নাম্বার লিস্ট (১০টি):\n\n{numbers_text}\n\n"
             "কোন নাম্বারটি কিনতে চান? নিচের বাটনে ক্লিক করুন:"
         )
         

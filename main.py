@@ -12,8 +12,7 @@ from datetime import datetime, timedelta
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
-RENDER_URL = os.getenv("RENDER_URL")  # e.g. "your-app-name.onrender.com"
-PORT = int(os.environ.get("PORT", 10000))
+RENDER_URL = os.getenv("RENDER_URL")  # Your Render URL (e.g., "your-bot-name.onrender.com")
 
 # Setup logging
 logging.basicConfig(
@@ -491,9 +490,10 @@ async def main():
     
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Bot is running on port {PORT}...")
+    logger.info(f"Bot is running on port {port}...")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":

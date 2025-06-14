@@ -131,8 +131,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔆 User ID : {user_id}\n"
             f"🔆 Username : @{username}"
         )
-        buttons = [[InlineKeyboardButton("APPRUVE ✅", callback_data=f"approve_{user_id}"),
-                    [InlineKeyboardButton("CANCEL ❌", callback_data=f"cancel_{user_id}")]]
+        buttons = [
+            [
+                InlineKeyboardButton("APPRUVE ✅", callback_data=f"approve_{user_id}"),
+                InlineKeyboardButton("CANCEL ❌", callback_data=f"cancel_{user_id}")
+            ]
+        ]
         reply_markup = InlineKeyboardMarkup(buttons)
 
         await query.message.delete()
@@ -199,7 +203,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(chat_id=user_id, text="আপনার টোকেনে পর্যাপ্ত ব্যালেন্স নাই 😥 অন্য টোকেন ব্যবহার করুন ♻️")
                         return
 
-                # Now try to purchase the number
+                # Now purchase the number
                 purchase_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/IncomingPhoneNumbers.json"
                 purchase_data = {
                     "PhoneNumber": number_to_buy,
@@ -208,21 +212,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 async with session_http.post(purchase_url, data=purchase_data) as purchase_resp:
                     if purchase_resp.status == 201:
-                        # Purchase successful
                         purchased_data = await purchase_resp.json()
                         phone_sid = purchased_data.get("sid")
-                        
-                        # Get updated balance
-                        async with session_http.get(balance_url) as updated_balance_resp:
-                            updated_balance_data = await updated_balance_resp.json()
-                            updated_balance = float(updated_balance_data.get("balance", 0.0))
-                            if currency != "USD":
-                                updated_balance *= usd_rate
+                        new_balance = balance - NUMBER_COST
 
                         new_text = (
                             f"🎉 Congestion নাম্বারটি কিনা হয়েছে 🎉\n\n"
                             f"☯️ Your Number : {number_to_buy}\n"
-                            f"☯️ Your Balance : ${updated_balance:.2f}\n"
+                            f"☯️ Your Balance : ${new_balance:.2f}\n"
                             f"☯️ Cost : ${NUMBER_COST:.2f}\n"
                             f"☯️ Phone SID : {phone_sid}"
                         )
@@ -237,11 +234,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         error_msg = error_data.get("message", "Unknown error")
                         await context.bot.send_message(
                             chat_id=user_id,
-                            text=f"❌ নাম্বার কেনা সম্ভব হয়নি: {error_msg}\n\n"
-                                 f"এটি হতে পারে:\n"
-                                 f"1. নাম্বারটি ইতিমধ্যে বিক্রি হয়ে গেছে\n"
-                                 f"2. আপনার অ্যাকাউন্টে পর্যাপ্ত ব্যালেন্স নেই\n"
-                                 f"3. Twilio API এর কোনো সমস্যা"
+                            text=f"❌ নাম্বার কেনা সম্ভব হয়নি: {error_msg}"
                         )
 
         except Exception as e:
@@ -260,7 +253,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             async with aiohttp.ClientSession(auth=aiohttp.BasicAuth(sid, auth)) as session_http:
-                # First get the phone number details
+                # Get phone number details first
                 phone_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/IncomingPhoneNumbers/{phone_sid}.json"
                 async with session_http.get(phone_url) as phone_resp:
                     if phone_resp.status != 200:
@@ -270,7 +263,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     phone_data = await phone_resp.json()
                     phone_number = phone_data.get("phone_number")
 
-                # Now get messages for this number
+                # Get messages for this number
                 messages_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json?To={phone_number}"
                 async with session_http.get(messages_url) as messages_resp:
                     if messages_resp.status != 200:
@@ -299,7 +292,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             "\n".join(message_texts)
                         )
                         
-                        # Add refresh button
                         buttons = [
                             [InlineKeyboardButton("🔄 Refresh Messages", callback_data=f"check_msg_{phone_sid}")],
                             [InlineKeyboardButton("❌ Close", callback_data="close_messages")]

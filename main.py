@@ -15,14 +15,15 @@ from telegram.ext import (
     filters
 )
 from twilio.rest import Client
+from twilio.base.exceptions import TwilioRestException
 
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "YOUR_ADMIN_ID"))
 TRIAL_USERS = set()
 SUBSCRIBED_USERS = {}
-USER_TWILIO_CREDS = {}  # Stores user_id: {'sid': '', 'token': '', 'account_name': '', 'balance': ''}
-PURCHASED_NUMBERS = {}  # Stores user_id: {'number': '', 'sid': ''}
+USER_TWILIO_CREDS = {}  # {user_id: {'sid': '', 'token': '', 'account_name': '', 'balance': ''}}
+PURCHASED_NUMBERS = {}   # {user_id: {'number': '', 'sid': '', 'purchase_date': ''}}
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -34,10 +35,17 @@ logger = logging.getLogger(__name__)
 PLANS = {
     "free_1h": {"label": "🎉 1 Hour - Free 🌸", "duration": 1, "price": 0},
     "1d": {"label": "🔴 1 Day - 2$", "duration": 24, "price": 2},
-    "7d": {"label": "🟠 7 Day - 10$", "duration": 24 * 7, "price": 10},
-    "15d": {"label": "🟡 15 Day - 15$", "duration": 24 * 15, "price": 15},
-    "30d": {"label": "🟢 30 Day - 20$", "duration": 24 * 30, "price": 20}
+    "7d": {"label": "🟠 7 Day - 10$", "duration": 24*7, "price": 10},
+    "15d": {"label": "🟡 15 Day - 15$", "duration": 24*15, "price": 15},
+    "30d": {"label": "🟢 30 Day - 20$", "duration": 24*30, "price": 20}
 }
+
+VALID_CANADA_AREA_CODES = [
+    "204", "226", "236", "249", "250", "289", "306", "343", "365", "403",
+    "416", "418", "431", "437", "438", "450", "506", "514", "519", "579",
+    "581", "587", "604", "613", "639", "647", "672", "705", "709", "778",
+    "780", "807", "819", "825", "867", "873", "902", "905"
+]
 
 # Decorator to check subscription
 def check_subscription(func):
@@ -64,6 +72,7 @@ def check_subscription(func):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
+    
     if user_id in SUBSCRIBED_USERS and SUBSCRIBED_USERS[user_id] > datetime.utcnow():
         expiry_date = SUBSCRIBED_USERS[user_id]
         remaining = expiry_date - datetime.utcnow()
@@ -198,7 +207,7 @@ async def handle_twilio_credentials(update: Update, context: ContextTypes.DEFAUL
         
     except Exception as e:
         logger.error(f"Twilio login failed: {e}")
-        await update.message.reply_text("Token Suspended 😃 অন্য টোকেন ব্যবহার করুন ✅")
+        await update.message.reply_text("❌ লগইন ব্যর্থ! টোকেন সঠিক কিনা চেক করুন আবার চেষ্টা করুন")
 
 @check_subscription
 async def subscription_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -233,49 +242,50 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ প্রথমে Twilio credentials লগইন করুন /login কমান্ড দিয়ে")
         return
     
-    # Check if area code provided
-    if context.args:
-        area_code = context.args[0]
-        if not area_code.isdigit() or len(area_code) != 3:
-            await update.message.reply_text("❌ ভুল Area Code! সঠিক ফরম্যাট: /buy <3-digit area code>")
-            return
-        numbers = generate_canada_numbers(20, area_code)
-    else:
-        numbers = generate_canada_numbers(20)
-    
-    # Create number list message
-    numbers_text = "\n".join([f"{i+1}. {num}" for i, num in enumerate(numbers)])
-    message = await update.message.reply_text(
-        f"🇨🇦 কানাডা নাম্বার লিস্ট:\n\n{numbers_text}\n\n"
-        "কোন নাম্বারটি কিনতে চান? নিচের বাটনে ক্লিক করুন:"
-    )
-    
-    # Create buttons for each number
-    buttons = []
-    for i, number in enumerate(numbers):
-        buttons.append([InlineKeyboardButton(f"{i+1}. {number}", callback_data=f"buy_{number}")])
-    
-    await context.bot.edit_message_reply_markup(
-        chat_id=update.effective_chat.id,
-        message_id=message.message_id,
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-def generate_canada_numbers(count=20, area_code=None):
-    numbers = []
-    for _ in range(count):
-        if area_code:
-            prefix = area_code
-        else:
-            prefix = random.choice(["204", "226", "236", "249", "250", "289", "306", "343", "365", "403", 
-                                   "416", "418", "431", "437", "438", "450", "506", "514", "519", "579", 
-                                   "581", "587", "604", "613", "639", "647", "672", "705", "709", "778", 
-                                   "780", "807", "819", "825", "867", "873", "902", "905"])
+    try:
+        twilio_client = Client(USER_TWILIO_CREDS[user_id]['sid'], USER_TWILIO_CREDS[user_id]['token'])
         
-        # Generate random 7 digits
-        suffix = ''.join([str(random.randint(0, 9)) for _ in range(7)])
-        numbers.append(f"+1{prefix}{suffix[:3]}{suffix[3:]}")
-    return numbers
+        # Check area code if provided
+        area_code = context.args[0] if context.args else None
+        if area_code and (not area_code.isdigit() or len(area_code) != 3 or area_code not in VALID_CANADA_AREA_CODES):
+            await update.message.reply_text("❌ ভুল Area Code! সঠিক 3-digit Canadian area code দিন")
+            return
+
+        # Get available numbers from Twilio
+        available_numbers = twilio_client.available_phone_numbers('CA') \
+                                        .local \
+                                        .list(area_code=area_code, limit=20)
+        
+        if not available_numbers:
+            await update.message.reply_text("❌ এই মুহূর্তে কোনো নাম্বার পাওয়া যাচ্ছে না। পরে আবার চেষ্টা করুন")
+            return
+        
+        # Prepare number list
+        numbers = [num.phone_number for num in available_numbers]
+        numbers_text = "\n".join([f"{i+1}. {num}" for i, num in enumerate(numbers)])
+        
+        message = await update.message.reply_text(
+            f"🇨🇦 উপলব্ধ কানাডা নাম্বার লিস্ট:\n\n{numbers_text}\n\n"
+            "কোন নাম্বারটি কিনতে চান? নিচের বাটনে ক্লিক করুন:"
+        )
+        
+        # Create buttons for each available number
+        buttons = []
+        for i, number in enumerate(numbers):
+            buttons.append([InlineKeyboardButton(f"{i+1}. {number}", callback_data=f"buy_{number}")])
+        
+        await context.bot.edit_message_reply_markup(
+            chat_id=update.effective_chat.id,
+            message_id=message.message_id,
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+    except TwilioRestException as e:
+        logger.error(f"Twilio error: {e}")
+        await update.message.reply_text(f"❌ Twilio এরর: {e.msg}")
+    except Exception as e:
+        logger.error(f"Error in buy command: {e}")
+        await update.message.reply_text("❌ নাম্বার লিস্ট দেখাতে সমস্যা হয়েছে! আবার চেষ্টা করুন")
 
 async def handle_number_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -284,39 +294,76 @@ async def handle_number_purchase(update: Update, context: ContextTypes.DEFAULT_T
     user_id = query.from_user.id
     number = query.data.split("_")[1]
     
-    # Check if already purchased
-    if user_id in PURCHASED_NUMBERS:
-        old_number = PURCHASED_NUMBERS[user_id]['number']
-        await query.message.reply_text(f"❌ আপনার ইতিমধ্যে {old_number} নাম্বারটি কেনা আছে!")
-        return
-    
     try:
-        # Purchase the number using Twilio
         twilio_client = Client(USER_TWILIO_CREDS[user_id]['sid'], USER_TWILIO_CREDS[user_id]['token'])
+        
+        # Check balance first
+        balance = float(twilio_client.balance.fetch().balance)
+        if balance < 1.00:
+            await query.message.reply_text(f"❌ আপনার Twilio একাউন্টে পর্যাপ্ত ব্যালেন্স নেই। বর্তমান ব্যালেন্স: ${balance:.2f}")
+            return
+        
+        # Delete old number if exists
+        if user_id in PURCHASED_NUMBERS:
+            try:
+                old_number_sid = PURCHASED_NUMBERS[user_id]['sid']
+                twilio_client.incoming_phone_numbers(old_number_sid).delete()
+                logger.info(f"Deleted old number SID: {old_number_sid}")
+            except Exception as e:
+                logger.error(f"Error deleting old number: {e}")
+        
+        # Purchase new number
         purchased_number = twilio_client.incoming_phone_numbers.create(phone_number=number)
         
-        # Store purchased number
+        # Store new number info
         PURCHASED_NUMBERS[user_id] = {
             'number': number,
-            'sid': purchased_number.sid
+            'sid': purchased_number.sid,
+            'purchase_date': datetime.utcnow()
         }
         
-        # Create message with button
-        keyboard = [[InlineKeyboardButton("📧 Message ✉️", callback_data=f"check_msg_{number}")]]
+        # Update balance
+        new_balance = balance - 1.00
+        USER_TWILIO_CREDS[user_id]['balance'] = new_balance
+        
+        # Prepare response
+        keyboard = [
+            [InlineKeyboardButton("📧 Check Messages ✉️", callback_data=f"check_msg_{number}")],
+            [InlineKeyboardButton("ℹ️ Number Info", callback_data=f"number_info_{number}")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        message = await query.message.reply_text(
-            f"✅ নাম্বারটি সফলভাবে কেনা হয়েছে: {number}\n\n"
-            "মেসেজ চেক করতে নিচের বাটনে ক্লিক করুন:",
+        response_text = (
+            f"✅ নাম্বার সফলভাবে কেনা হয়েছে!\n\n"
+            f"📞 নাম্বার: {number}\n"
+            f"💰 খরচ: $1.00\n"
+            f"📊 নতুন ব্যালেন্স: ${new_balance:.2f}\n"
+            f"🕒 কেনার সময়: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        
+        # If old number existed, add info about deletion
+        if user_id in PURCHASED_NUMBERS:
+            response_text += "\n\nℹ️ আপনার পূর্বের নাম্বারটি অটোমেটিক ডিলিট করা হয়েছে"
+        
+        await query.message.reply_text(
+            response_text,
             reply_markup=reply_markup
         )
         
-        # Store message ID for later editing
-        context.user_data['last_purchase_msg'] = message.message_id
+    except TwilioRestException as e:
+        error_msg = f"Twilio Error ({e.code}): {e.msg}"
+        logger.error(f"Number purchase failed: {error_msg}")
         
+        if e.code == 20404:
+            await query.message.reply_text("❌ এই নাম্বারটি এখন পাওয়া যাচ্ছে না। নতুন করে /buy কমান্ড দিয়ে চেষ্টা করুন")
+        elif e.code == 21215:
+            await query.message.reply_text("❌ এই নাম্বার কেনার জন্য আপনার একাউন্টে অনুমতি নেই")
+        else:
+            await query.message.reply_text(f"❌ Twilio এরর: {e.msg}")
+            
     except Exception as e:
-        logger.error(f"Error purchasing number: {e}")
-        await query.message.reply_text("❌ নাম্বার কেনার সময় সমস্যা হয়েছে! আবার চেষ্টা করুন")
+        logger.error(f"Unexpected error: {str(e)}")
+        await query.message.reply_text("❌ নাম্বার কেনার সময় অপ্রত্যাশিত সমস্যা হয়েছে! আবার চেষ্টা করুন")
 
 async def check_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -352,7 +399,7 @@ async def check_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.edit_message_text(
                 chat_id=query.message.chat_id,
                 message_id=query.message.message_id,
-                text=f"✅ নাম্বারটি সফলভাবে কেনা হয়েছে: {number}\n\n"
+                text=f"✅ নাম্বার: {number}\n\n"
                      "মেসেজ চেক করতে নিচের বাটনে ক্লিক করুন:",
                 reply_markup=query.message.reply_markup
             )
@@ -360,6 +407,40 @@ async def check_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error checking messages: {e}")
         await query.message.reply_text("❌ মেসেজ চেক করার সময় সমস্যা হয়েছে!")
+
+async def number_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    number = query.data.split("_")[2]
+    
+    if user_id not in PURCHASED_NUMBERS or PURCHASED_NUMBERS[user_id]['number'] != number:
+        await query.message.reply_text("❌ এই নাম্বারটি আপনার কেনা নাম্বারের লিস্টে নেই")
+        return
+    
+    try:
+        twilio_client = Client(USER_TWILIO_CREDS[user_id]['sid'], USER_TWILIO_CREDS[user_id]['token'])
+        number_details = twilio_client.incoming_phone_numbers(PURCHASED_NUMBERS[user_id]['sid']).fetch()
+        
+        info_text = (
+            f"📞 নাম্বার ডিটেইলস:\n\n"
+            f"🔢 নাম্বার: {number}\n"
+            f"📅 কেনার তারিখ: {PURCHASED_NUMBERS[user_id]['purchase_date'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"🆔 SID: {number_details.sid}\n"
+            f"🔗 URL: {number_details.uri}\n"
+            f"🔄 সিঙ্ক স্ট্যাটাস: {number_details.status}"
+        )
+        
+        await context.bot.edit_message_text(
+            chat_id=query.message.chat_id,
+            message_id=query.message.message_id,
+            text=info_text
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting number info: {e}")
+        await query.message.reply_text("❌ নাম্বার ইনফো দেখাতে সমস্যা হয়েছে!")
 
 async def check_expired_subscriptions(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.utcnow()
@@ -408,6 +489,7 @@ async def main():
     application.add_handler(CallbackQueryHandler(handle_login_prompt, pattern="^login_prompt$"))
     application.add_handler(CallbackQueryHandler(handle_number_purchase, pattern="^buy_"))
     application.add_handler(CallbackQueryHandler(check_messages, pattern="^check_msg_"))
+    application.add_handler(CallbackQueryHandler(number_info, pattern="^number_info_"))
     
     # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_twilio_credentials))

@@ -7,23 +7,18 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 import random
 import re
-from datetime import datetime, timedelta
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 free_trial_users = {}
 user_sessions = {}
-purchased_numbers = {}  # Track purchased numbers: {user_id: [numbers]}
 
 CANADA_AREA_CODES = ['204', '236', '249', '250', '289', '306', '343', '365', '403', '416', '418', '431', '437', '438', '450', '506', '514', '519', '579', '581', '587', '604', '613', '639', '647', '672', '705', '709', '778', '780', '782', '807', '819', '825', '867', '873', '902', '905']
 
-# Cost per number (Assuming fixed cost, can adjust if needed)
 NUMBER_COST = 1.0  # $1 per number
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,7 +102,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = query.from_user.full_name
     username = query.from_user.username or "N/A"
 
-    # ফ্রি প্ল্যান নেওয়া
     if query.data == "plan_free":
         if free_trial_users.get(user_id):
             await query.edit_message_text("⚠️ আপনি এরই মধ্যে Free Trial ব্যবহার করেছেন।")
@@ -122,7 +116,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=user_id, text="🌻 আপনার Free Trial টি শেষ হতে যাচ্ছে")
             asyncio.create_task(revoke())
 
-    # Subscription প্ল্যান রিকোয়েস্ট (অ্যাডমিনের কাছে যাবে)
     elif query.data.startswith("plan_"):
         plan_info = {
             "plan_1d": ("1 Day", "2$"),
@@ -139,7 +132,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔆 Username : @{username}"
         )
         buttons = [[InlineKeyboardButton("APPRUVE ✅", callback_data=f"approve_{user_id}"),
-                    InlineKeyboardButton("CANCEL ❌", callback_data=f"cancel_{user_id}")]]
+                    [InlineKeyboardButton("CANCEL ❌", callback_data=f"cancel_{user_id}")]]
         reply_markup = InlineKeyboardMarkup(buttons)
 
         await query.message.delete()
@@ -179,7 +172,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("buy_number_"):
         number_to_buy = query.data[len("buy_number_"):]
         session = user_sessions.get(user_id)
-        
         if not session or not session.get("logged_in", False):
             await context.bot.send_message(chat_id=user_id, text="❌ দয়া করে প্রথমে /login দিয়ে Token দিয়ে Log In করুন।")
             return
@@ -189,7 +181,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             async with aiohttp.ClientSession(auth=aiohttp.BasicAuth(sid, auth)) as session_http:
-                # Check balance first
+                # First check balance
                 balance_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Balance.json"
                 async with session_http.get(balance_url) as balance_resp:
                     balance_data = await balance_resp.json()
@@ -197,7 +189,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     currency = balance_data.get("currency", "USD")
 
                     if currency != "USD":
-                        rate_url = f"https://api.exchangerate-api.com/v4/latest/{currency}"
+                        rate_url = f"https://open.er-api.com/v6/latest/{currency}"
                         async with session_http.get(rate_url) as rate_resp:
                             rates = await rate_resp.json()
                             usd_rate = rates["rates"].get("USD", 1)
@@ -207,45 +199,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(chat_id=user_id, text="আপনার টোকেনে পর্যাপ্ত ব্যালেন্স নাই 😥 অন্য টোকেন ব্যবহার করুন ♻️")
                         return
 
-                # Purchase the number (this is a simulation - actual purchase requires Twilio API)
-                # In a real implementation, you would use the Twilio API to purchase a number
-                # For this example, we'll just simulate the purchase
-                
-                # Add to purchased numbers
-                if user_id not in purchased_numbers:
-                    purchased_numbers[user_id] = []
-                purchased_numbers[user_id].append(number_to_buy)
-                
-                # Deduct cost from balance (simulated)
-                balance_after = balance - NUMBER_COST
+                # Now try to purchase the number
+                purchase_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/IncomingPhoneNumbers.json"
+                purchase_data = {
+                    "PhoneNumber": number_to_buy,
+                    "SmsUrl": "https://demo.twilio.com/welcome/sms/reply/"
+                }
 
-                # Edit original message
-                new_text = (
-                    f"🎉 Congestion নাম্বারটি কিনা হয়েছে 🎉\n\n"
-                    f"☯️ Your Number : {number_to_buy}\n"
-                    f"☯️ Your Balance : ${balance_after:.2f}\n"
-                    f"☯️ Cost : ${NUMBER_COST:.2f}"
-                )
-                message_buttons = [[InlineKeyboardButton("📧 Message ✉️", callback_data=f"message_{number_to_buy}")]]
-                new_markup = InlineKeyboardMarkup(message_buttons)
+                async with session_http.post(purchase_url, data=purchase_data) as purchase_resp:
+                    if purchase_resp.status == 201:
+                        # Purchase successful
+                        purchased_data = await purchase_resp.json()
+                        phone_sid = purchased_data.get("sid")
+                        
+                        # Get updated balance
+                        async with session_http.get(balance_url) as updated_balance_resp:
+                            updated_balance_data = await updated_balance_resp.json()
+                            updated_balance = float(updated_balance_data.get("balance", 0.0))
+                            if currency != "USD":
+                                updated_balance *= usd_rate
 
-                await query.message.edit_text(new_text, reply_markup=new_markup)
-                
-                # Send confirmation
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"✅ আপনি সফলভাবে এই নাম্বারটি কিনেছেন: {number_to_buy}\n\n"
-                         f"এই নাম্বারে আসা SMS দেখতে '📧 Message ✉️' বাটনে ক্লিক করুন"
-                )
+                        new_text = (
+                            f"🎉 Congestion নাম্বারটি কিনা হয়েছে 🎉\n\n"
+                            f"☯️ Your Number : {number_to_buy}\n"
+                            f"☯️ Your Balance : ${updated_balance:.2f}\n"
+                            f"☯️ Cost : ${NUMBER_COST:.2f}\n"
+                            f"☯️ Phone SID : {phone_sid}"
+                        )
+                        message_buttons = [
+                            [InlineKeyboardButton("📧 Check Messages ✉️", callback_data=f"check_msg_{phone_sid}")]
+                        ]
+                        new_markup = InlineKeyboardMarkup(message_buttons)
+
+                        await query.message.edit_text(new_text, reply_markup=new_markup)
+                    else:
+                        error_data = await purchase_resp.json()
+                        error_msg = error_data.get("message", "Unknown error")
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=f"❌ নাম্বার কেনা সম্ভব হয়নি: {error_msg}\n\n"
+                                 f"এটি হতে পারে:\n"
+                                 f"1. নাম্বারটি ইতিমধ্যে বিক্রি হয়ে গেছে\n"
+                                 f"2. আপনার অ্যাকাউন্টে পর্যাপ্ত ব্যালেন্স নেই\n"
+                                 f"3. Twilio API এর কোনো সমস্যা"
+                        )
 
         except Exception as e:
             logger.error(f"Error during number purchase: {e}")
             await context.bot.send_message(chat_id=user_id, text="কিছু ভুল হয়েছে, আবার চেষ্টা করুন।")
 
-    elif query.data.startswith("message_"):
-        selected_number = query.data[len("message_"):]
+    elif query.data.startswith("check_msg_"):
+        phone_sid = query.data[len("check_msg_"):]
         session = user_sessions.get(user_id)
-        
         if not session or not session.get("logged_in", False):
             await context.bot.send_message(chat_id=user_id, text="❌ দয়া করে প্রথমে /login দিয়ে Token দিয়ে Log In করুন।")
             return
@@ -255,52 +260,64 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             async with aiohttp.ClientSession(auth=aiohttp.BasicAuth(sid, auth)) as session_http:
-                # Get messages for this number
-                messages_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json?To={selected_number}"
-                async with session_http.get(messages_url) as resp:
-                    messages_data = await resp.json()
+                # First get the phone number details
+                phone_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/IncomingPhoneNumbers/{phone_sid}.json"
+                async with session_http.get(phone_url) as phone_resp:
+                    if phone_resp.status != 200:
+                        await query.edit_message_text("❌ ফোন নাম্বার ডিটেইলস লোড করতে সমস্যা হয়েছে")
+                        return
+                    
+                    phone_data = await phone_resp.json()
+                    phone_number = phone_data.get("phone_number")
+
+                # Now get messages for this number
+                messages_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json?To={phone_number}"
+                async with session_http.get(messages_url) as messages_resp:
+                    if messages_resp.status != 200:
+                        await query.edit_message_text("❌ মেসেজ লোড করতে সমস্যা হয়েছে")
+                        return
+                    
+                    messages_data = await messages_resp.json()
                     messages = messages_data.get("messages", [])
 
                     if messages:
-                        latest_message = messages[0]  # Get the latest message
-                        message_body = latest_message.get("body", "No content")
-                        from_number = latest_message.get("from", "Unknown")
-                        date_sent = latest_message.get("date_sent", "Unknown")
-
-                        response_text = (
-                            f"📨 New Message Received 📨\n\n"
-                            f"🔹 From: {from_number}\n"
-                            f"🔹 To: {selected_number}\n"
-                            f"🔹 Date: {date_sent}\n\n"
-                            f"📝 Message:\n{message_body}"
+                        message_texts = []
+                        for msg in messages[:5]:  # Show last 5 messages
+                            body = msg.get("body", "No content")
+                            from_num = msg.get("from", "Unknown")
+                            date = msg.get("date_created", "Unknown")
+                            message_texts.append(
+                                f"📨 From: {from_num}\n"
+                                f"📅 Date: {date}\n"
+                                f"💬 Message: {body}\n"
+                                f"──────────────────"
+                            )
+                        
+                        full_text = (
+                            f"📱 Number: {phone_number}\n"
+                            f"📩 Last Messages:\n\n" +
+                            "\n".join(message_texts)
                         )
                         
-                        # Add button to refresh messages
+                        # Add refresh button
                         buttons = [
-                            [InlineKeyboardButton("🔄 Refresh Messages", callback_data=f"message_{selected_number}")],
+                            [InlineKeyboardButton("🔄 Refresh Messages", callback_data=f"check_msg_{phone_sid}")],
                             [InlineKeyboardButton("❌ Close", callback_data="close_messages")]
                         ]
                         reply_markup = InlineKeyboardMarkup(buttons)
                         
-                        await query.message.edit_text(response_text, reply_markup=reply_markup)
+                        await query.edit_message_text(full_text, reply_markup=reply_markup)
                     else:
-                        await query.message.edit_text("❌ No messages found for this number.")
-                        
-                        # Add button to try again
                         buttons = [
-                            [InlineKeyboardButton("🔄 Try Again", callback_data=f"message_{selected_number}")],
+                            [InlineKeyboardButton("🔄 Refresh Messages", callback_data=f"check_msg_{phone_sid}")],
                             [InlineKeyboardButton("❌ Close", callback_data="close_messages")]
                         ]
                         reply_markup = InlineKeyboardMarkup(buttons)
-                        
-                        await query.message.edit_text(
-                            f"No messages found for number: {selected_number}",
-                            reply_markup=reply_markup
-                        )
+                        await query.edit_message_text("📭 কোনো মেসেজ পাওয়া যায়নি", reply_markup=reply_markup)
 
         except Exception as e:
-            logger.error(f"Error fetching messages: {e}")
-            await context.bot.send_message(chat_id=user_id, text="🚫 মেসেজ পড়তে সমস্যা হয়েছে, পরে চেষ্টা করুন।")
+            logger.error(f"Error checking messages: {e}")
+            await query.edit_message_text("❌ মেসেজ চেক করতে সমস্যা হয়েছে")
 
     elif query.data == "close_messages":
         await query.message.delete()

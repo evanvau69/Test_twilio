@@ -114,6 +114,19 @@ async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     asyncio.create_task(delete_message())
 
+async def delete_existing_numbers(session_http, sid):
+    """Delete all existing phone numbers for the account"""
+    existing_numbers_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/IncomingPhoneNumbers.json"
+    async with session_http.get(existing_numbers_url) as existing_resp:
+        if existing_resp.status == 200:
+            existing_data = await existing_resp.json()
+            for number in existing_data.get("incoming_phone_numbers", []):
+                phone_sid = number.get("sid")
+                delete_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/IncomingPhoneNumbers/{phone_sid}.json"
+                async with session_http.delete(delete_url) as delete_resp:
+                    if delete_resp.status != 204:
+                        logger.warning(f"Failed to delete number {phone_sid}")
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -230,19 +243,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             async with aiohttp.ClientSession(auth=aiohttp.BasicAuth(sid, auth)) as session_http:
-                # Verify account first
-                account_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}.json"
-                async with session_http.get(account_url) as account_resp:
-                    if account_resp.status != 200:
-                        error_data = await account_resp.json()
-                        error_msg = error_data.get("message", "Account verification failed")
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text=f"❌ Account verification failed: {error_msg}"
-                        )
-                        return
+                # 1. Delete any existing numbers first
+                await delete_existing_numbers(session_http, sid)
 
-                # Check balance
+                # 2. Check balance
                 balance_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Balance.json"
                 async with session_http.get(balance_url) as balance_resp:
                     balance_data = await balance_resp.json()
@@ -263,7 +267,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         return
 
-                # Purchase number
+                # 3. Purchase new number
                 purchase_url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/IncomingPhoneNumbers.json"
                 purchase_data = {
                     "PhoneNumber": number_to_buy,
@@ -307,17 +311,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             text=f"❌ Failed to purchase number: {error_msg}"
                         )
 
-        except aiohttp.ClientError as e:
-            logger.error(f"Network error: {e}")
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="❌ Network error, please try again later"
-            )
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"Error in purchase: {str(e)}")
             await context.bot.send_message(
                 chat_id=user_id,
-                text="❌ An unexpected error occurred, please try again later"
+                text="❌ An error occurred during purchase. Please try again."
             )
 
     elif query.data.startswith("check_msg_"):

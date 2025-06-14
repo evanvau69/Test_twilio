@@ -1,0 +1,9 @@
+python-telegram-bot==20.3
+aiohttp
+aiogram
+twilio
+nest_asyncio
+pyTelegramBotAPI
+pyTelegramBotAPI==4.14.1
+Flask
+requests

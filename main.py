@@ -31,7 +31,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         buttons = [
-            [InlineKeyboardButton("⬜ 1 Hour - Free 🌸", callback_data="sub_free")],
+            [InlineKeyboardButton("🎉 1 Hour - Free 🌸", callback_data="sub_free")],
             [InlineKeyboardButton("🔴 1 Day - 2$", callback_data="sub_1")],
             [InlineKeyboardButton("🟠 7 Day - 10$", callback_data="sub_7")],
             [InlineKeyboardButton("🟡 15 Day - 15$", callback_data="sub_15")],

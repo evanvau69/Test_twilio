@@ -7,8 +7,8 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
                           CallbackQueryHandler, MessageHandler, filters)
 import aiohttp
 
-BOT_TOKEN = "আপনার_টেলিগ্রাম_বট_টোকেন"
-ADMIN_ID = 123456789  # আপনার টেলিগ্রাম ID এখানে বসান
+BOT_TOKEN = "7938926278:AAFRUMnq968-gcd4z9mV04cGGyu2v2X6bvE"
+ADMIN_ID = 6165060012  # আপনার টেলিগ্রাম ID এখানে বসান
 BINANCE_PAY_ID = "your-binance-pay-id"  # এখানেও ID বসান
 
 # Simple in-memory DB

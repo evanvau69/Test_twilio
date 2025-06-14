@@ -1,163 +1,196 @@
 import os
 import logging
 import asyncio
-import aiohttp
+import datetime
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from twilio.rest import Client
-from datetime import datetime, timedelta
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID")) if os.getenv("ADMIN_ID") else None
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# In-memory storage
-user_subscriptions = {}
-free_trial_used = set()
-user_sessions = {}
+user_sessions = {}  # user_id -> {sid, auth, client}
+login_messages = {}  # user_id -> login msg id
+subscriptions = {}  # user_id -> expiry datetime
+free_trial_used = set()  # user_id set
+
+plans = {
+    "1h_free": {"label": "⬜ 1 Hour - Free 🌸", "duration": 1, "unit": "hours", "price": 0},
+    "1d": {"label": "🔴 1 Day - 2$", "duration": 1, "unit": "days", "price": 2},
+    "7d": {"label": "🟠 7 Day - 10$", "duration": 7, "unit": "days", "price": 10},
+    "15d": {"label": "🟡 15 Day - 15$", "duration": 15, "unit": "days", "price": 15},
+    "30d": {"label": "🟢 30 Day - 20$", "duration": 30, "unit": "days", "price": 20}
+}
+
+def has_active_subscription(user_id):
+    expiry = subscriptions.get(user_id)
+    return expiry and expiry > datetime.datetime.now()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    full_name = update.effective_user.full_name
-
-    # Check if subscription exists and is still active
-    now = datetime.now()
-    if user_id in user_subscriptions and user_subscriptions[user_id] > now:
+    user = update.effective_user
+    if has_active_subscription(user.id):
         await update.message.reply_text(
-            f"স্বাগতম {full_name} ✨\n\nআপনার Subscription চালু আছে ✅\nটোকেন দিয়ে লগইন করতে /login ব্যবহার করুন 🔐"
+            f"স্বাগতম {user.first_name} আপনার Subscription চালু আছে ✨\n"
+            f"Login করতে /login কমান্ড ব্যবহার করুন ✅"
         )
     else:
         buttons = [
-            [InlineKeyboardButton("🎉 1 Hour - Free 🌸", callback_data="sub_free")],
-            [InlineKeyboardButton("🔴 1 Day - 2$", callback_data="sub_1")],
-            [InlineKeyboardButton("🟠 7 Day - 10$", callback_data="sub_7")],
-            [InlineKeyboardButton("🟡 15 Day - 15$", callback_data="sub_15")],
-            [InlineKeyboardButton("🟢 30 Day - 20$", callback_data="sub_30")],
+            [InlineKeyboardButton(p["label"], callback_data=f"sub_{key}")]
+            for key, p in plans.items()
         ]
         await update.message.reply_text(
-            "আপনার Subscriptions চালু নেই ♻️\nচালু করার জন্য নিচের Subscription Choose করুন ✅",
+            "আপনার Subscriptions চালু নেই ♻️ চালু করার জন্য নিচের Subscription Choose করুন ✅",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
-async def handle_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_subscription_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = query.from_user
-    user_id = user.id
-    full_name = user.full_name
-    username = user.username or "NoUsername"
-    now = datetime.now()
+    choice = query.data.replace("sub_", "")
+    plan = plans.get(choice)
+    if not plan:
+        return
 
-    if query.data == "sub_free":
-        if user_id in free_trial_used:
-            await query.edit_message_text("আপনি একবার ফ্রি ট্রায়াল নিয়েছেন ✅")
+    await context.bot.delete_message(chat_id=user.id, message_id=query.message.message_id)
+
+    if choice == "1h_free":
+        if user.id in free_trial_used:
+            await query.message.reply_text("⚠️ আপনি ইতোমধ্যে ফ্রি ট্রায়াল গ্রহণ করেছেন। অন্য প্ল্যান বেছে নিন।")
         else:
-            free_trial_used.add(user_id)
-            user_subscriptions[user_id] = now + timedelta(hours=1)
-            await query.edit_message_text("✅ 1 ঘন্টার ফ্রি সাবস্ক্রিপশন চালু হয়েছে!")
+            delta = datetime.timedelta(**{plan["unit"]: plan["duration"]})
+            subscriptions[user.id] = datetime.datetime.now() + delta
+            free_trial_used.add(user.id)
+            await query.message.reply_text("✅ ফ্রি ট্রায়াল ১ ঘণ্টার জন্য চালু করা হয়েছে!")
     else:
-        plans = {
-            "sub_1": (1, 2),
-            "sub_7": (7, 10),
-            "sub_15": (15, 15),
-            "sub_30": (30, 20)
-        }
-        days, amount = plans[query.data]
-        msg = f"Please send ${amount} to Binance Pay ID:\n\n"
-        msg += "পেমেন্ট করে প্রমাণ হিসাবে Admin এর কাছে স্ক্রিনশট অথবা Transaction ID দিন 👉 @Mr_Evan3490\n\n"
-        msg += f"Your payment details:\n❄️ Name: {full_name}\n🆔 User ID: `{user_id}`\n👤 Username: @{username}\n📋 Plan: {days} Day\n💰 Amount: ${amount}"
-        await query.edit_message_text(msg, parse_mode="Markdown")
-
-        # Notify admin
-        admin_msg = (
-            f"{full_name} {days} দিনের Subscription নিতে চাচ্ছে।\n\n"
-            f"🔆 User Name: {full_name}\n🔆 User ID: `{user_id}`\n🔆 Username: @{username}"
+        msg = (
+            f"Please send ${plan['price']} to Binance Pay ID:
+"
+            f"পেমেন্ট করে প্রমাণ হিসাবে Admin এর কাছে স্কিনশর্ট অথবা transaction ID দিন @Mr_Evan3490\n\n"
+            f"Your payment details:\n"
+            f"❄️ Name : {user.first_name}\n"
+            f"🆔 User ID: {user.id}\n"
+            f"👤 Username: @{user.username if user.username else 'N/A'}\n"
+            f"📋 Plan: {plan['label']}\n"
+            f"💰 Amount: ${plan['price']}"
         )
-        buttons = [
+        await query.message.reply_text(msg)
+
+        admin_msg = (
+            f"{user.first_name} {plan['duration']} {plan['unit']} সময়ের জন্য Subscription নিতে চাচ্ছে।\n\n"
+            f"🔆 User Name : {user.first_name}\n"
+            f"🔆 User ID : {user.id}\n"
+            f"🔆 Username : @{user.username if user.username else 'N/A'}"
+        )
+        admin_buttons = [
             [
-                InlineKeyboardButton("Approve ✅", callback_data=f"approve_{user_id}_{days}"),
-                InlineKeyboardButton("Cancel ❌", callback_data=f"cancel_{user_id}")
+                InlineKeyboardButton("Appruve ✅", callback_data=f"approve_{user.id}_{choice}"),
+                InlineKeyboardButton("Cancel ❌", callback_data=f"cancel_{user.id}")
             ]
         ]
-        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, reply_markup=InlineKeyboardMarkup(admin_buttons))
 
-async def admin_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_admin_approval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     if data.startswith("approve_"):
-        _, uid, days = data.split("_")
-        user_id = int(uid)
-        days = int(days)
-        user_subscriptions[user_id] = datetime.now() + timedelta(days=days)
-        await query.edit_message_text("✅ Subscription Approved")
-        await context.bot.send_message(chat_id=user_id, text=f"✅ আপনার {days} দিনের Subscription চালু হয়েছে!")
+        _, uid, plan_key = data.split("_")
+        uid = int(uid)
+        plan = plans.get(plan_key)
+        if not plan:
+            return
+        delta = datetime.timedelta(**{plan["unit"]: plan["duration"]})
+        subscriptions[uid] = datetime.datetime.now() + delta
+        await context.bot.send_message(chat_id=uid, text=f"✅ আপনার {plan['label']} Subscription চালু করা হয়েছে!")
+        await query.edit_message_text("✅ Approve করা হয়েছে")
     elif data.startswith("cancel_"):
-        _, uid = data.split("_")
-        user_id = int(uid)
-        await query.edit_message_text("❌ Subscription Cancelled")
-        await context.bot.send_message(chat_id=user_id, text=f"❌ আপনার Subscription অনুরোধ বাতিল করা হয়েছে।")
+        uid = int(data.split("_")[1])
+        await context.bot.send_message(chat_id=uid, text="❌ আপনার Subscription বাতিল করা হয়েছে।")
+        await query.edit_message_text("🚫 Cancel করা হয়েছে")
 
-async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    buttons = [[InlineKeyboardButton("Login 🔒", callback_data="twilio_login")]]
-    await update.message.reply_text("Login করতে নিচের বাটনে ক্লিক করুন", reply_markup=InlineKeyboardMarkup(buttons))
+async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not has_active_subscription(update.effective_user.id):
+        await update.message.reply_text("⚠️ আগে Subscription চালু করুন। /start দিয়ে শুরু করুন।")
+        return
+    keyboard = [
+        [InlineKeyboardButton("Login 🔒", callback_data="start_login")]
+    ]
+    msg = await update.message.reply_text(
+        "Login করতে নিচের বাটনে ক্লিক করুন",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    login_messages[update.effective_user.id] = msg.message_id
 
-async def twilio_login_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.data.startswith("sub_"):
+        await handle_subscription_choice(update, context)
+    elif query.data.startswith("approve_") or query.data.startswith("cancel_"):
+        await handle_admin_approval(update, context)
+    elif query.data == "start_login":
+        user_id = query.from_user.id
+        chat_id = query.message.chat.id
+        old_msg_id = login_messages.get(user_id)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+        except:
+            pass
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="আপনার Sid এবং Auth Token দিন ✅\nব্যবহার : <sid> <auth>"
+        )
     await query.answer()
-    await query.message.delete()
-    await context.bot.send_message(chat_id=query.from_user.id, text="আপনার Sid এবং Auth Token দিন ✅\nব্যবহার : `<sid> <auth>`", parse_mode="Markdown")
 
 async def handle_sid_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in user_subscriptions or user_subscriptions[user_id] < datetime.now():
+    if not has_active_subscription(user_id):
         return
-
-    msg = update.message.text.strip()
-    if len(msg.split()) != 2:
-        return
-    sid, auth = msg.split()
-    try:
-        client = Client(sid, auth)
-        acc = client.api.accounts(sid).fetch()
-        balance = client.api.v2010.balance.fetch()
-        usd_balance = round(float(balance.balance), 2)
-        user_sessions[user_id] = {"sid": sid, "auth": auth}
-        await update.message.reply_text(
-            f"🎉 𝐋𝐨𝐠 𝐈𝐧 𝐒𝐮𝐜𝐜𝐞𝐬𝐬𝐟𝐮𝐥 🎉\n\n"
-            f"⭕ 𝗔𝗰𝗰𝗼𝘂𝗻𝘁 𝗡𝗮𝗺𝗲 : {acc.friendly_name}\n"
-            f"⭕ 𝗔𝗰𝗰𝗼𝘂𝗻𝘁 𝗕𝗮𝗹𝗮𝗻𝗰𝗲 : ${usd_balance}\n\n"
-            f"বিঃদ্রঃ নাম্বার কিনার আগে ব্যালেন্স চেক করে নিবেন ♻️\n\nFounded By 𝗠𝗿 𝗘𝘃𝗮𝗻 🍁"
-        )
-    except Exception as e:
-        await update.message.reply_text("Token Suspended 😃 অন্য টোকেন ব্যবহার করুন ✅")
+    text = update.message.text.strip()
+    parts = text.split()
+    if len(parts) == 2:
+        sid, auth = parts
+        try:
+            client = Client(sid, auth)
+            account = client.api.accounts(sid).fetch()
+            balance_info = client.api.v2010.balance.fetch()
+            balance = float(balance_info.balance)
+            user_sessions[user_id] = {"sid": sid, "auth": auth, "client": client}
+            await update.message.reply_text(
+                f"🎉 𝐋𝐨𝐠 𝐈𝐧 𝐒𝐮𝐜𝐜𝐞𝐬𝐬𝐟𝐮𝐥🎉\n\n"
+                f"⭕ 𝗔𝗰𝗰𝗼𝘂𝗻𝘁 𝗡𝗮𝗺𝗲 : {account.friendly_name}\n"
+                f"⭕ 𝗔𝗰𝗰𝗼𝘂𝗻𝘁 𝗕𝗮𝗹𝗮𝗻𝗰𝗲 : ${balance:.2f}\n\n"
+                f"বিঃদ্রঃ নাম্বার কিনার আগে ব্যালেন্স চেক করে নিবেন ♻️\n\n"
+                f"Founded By 𝗠𝗿 𝗘𝘃𝗮𝗻 🍁"
+            )
+        except Exception as e:
+            await update.message.reply_text("Token Suspended 😃 অন্য টোকেন ব্যবহার করুন ✅")
+            logger.warning(f"Login failed for user {user_id}: {e}")
 
 async def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_subscription, pattern="^sub_"))
-    app.add_handler(CallbackQueryHandler(admin_response, pattern="^(approve_|cancel_)"))
-    app.add_handler(CommandHandler("login", login))
-    app.add_handler(CallbackQueryHandler(twilio_login_button, pattern="^twilio_login$"))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_sid_auth))
+    app.add_handler(CommandHandler("login", login_command))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sid_auth))
 
-    async def webhook(request):
-        data = await request.json()
-        update = Update.de_json(data, app.bot)
-        await app.process_update(update)
-        return web.Response()
+    aio_app = web.Application()
+    aio_app.add_routes([web.post("/", app.webhook_handler())])
 
-    app_runner = web.AppRunner(web.Application())
-    await app_runner.setup()
-    site = web.TCPSite(app_runner, "0.0.0.0", 80)
+    webhook_url = os.getenv("WEBHOOK_URL")
+    await app.bot.set_webhook(webhook_url)
+
+    runner = web.AppRunner(aio_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "8080")))
     await site.start()
-    await app.initialize()
-    await app.start()
+
+    print("Bot is running via webhook...")
     await asyncio.Event().wait()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())
